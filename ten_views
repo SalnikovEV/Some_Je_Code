@@ -1,0 +1,283 @@
+import threading
+import time
+import keyboard
+import cv2
+import numpy as np
+from datetime import datetime
+import os
+
+# Инициализация данных
+views = list(range(10))  # 0–9
+dop_f = ["s", "q", "p", "z"]  # добавлена z для остановки записи
+
+index_views = -1
+index_dop = -1
+
+lock = threading.Lock()
+run = True
+
+# Переменные для обработки изображений
+current_frame = None
+frame_lock = threading.Lock()
+processing_enabled = True
+
+# Переменные для записи видео
+video_writer = None
+is_recording = False
+video_filename = ""
+photo_counter = 0
+
+# Создаем папки для сохранения
+os.makedirs("photos", exist_ok=True)
+os.makedirs("videos", exist_ok=True)
+
+
+# Поток захвата камеры
+def camera_capture():
+    global current_frame, run
+    cap = cv2.VideoCapture(0)  # открываем камеру 0
+
+    if not cap.isOpened():
+        print("Ошибка: не удалось открыть камеру")
+        return
+
+    print("Камера запущена")
+
+    while run:
+        ret, frame = cap.read()
+        if ret:
+            with frame_lock:
+                current_frame = frame.copy()
+        else:
+            print("Ошибка захвата кадра")
+            time.sleep(0.1)
+
+    cap.release()
+    print("Камера остановлена")
+
+
+# 10 вариантов обработки изображения
+def process_image(frame, mode):
+    if frame is None:
+        return frame
+
+    h, w = frame.shape[:2]
+    processed = frame.copy()
+
+    if mode == 0:  # Исходное изображение
+        return frame
+
+    elif mode == 1:  # Чёрно-белое
+        processed = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+
+    elif mode == 2:  # Сепия
+        kernel = np.array([[0.272, 0.534, 0.131],
+                           [0.349, 0.686, 0.168],
+                           [0.393, 0.769, 0.189]])
+        processed = cv2.transform(frame, kernel)
+        processed = np.clip(processed, 0, 255).astype(np.uint8)
+
+    elif mode == 3:  # Размытие
+        processed = cv2.GaussianBlur(frame, (15, 15), 0)
+
+    elif mode == 4:  # Детекция краёв (Canny)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 100, 200)
+        processed = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+
+    elif mode == 5:  # Инверсия цветов
+        processed = cv2.bitwise_not(frame)
+
+    elif mode == 6:  # Повышение резкости
+        kernel = np.array([[-1, -1, -1],
+                           [-1, 9, -1],
+                           [-1, -1, -1]])
+        processed = cv2.filter2D(frame, -1, kernel)
+
+    elif mode == 7:  # Эффект акварели
+        processed = cv2.stylization(frame, sigma_s=60, sigma_r=0.6)
+
+    elif mode == 8:  # Детекция лиц
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+
+        for (x, y, w, h) in faces:
+            cv2.rectangle(processed, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+    elif mode == 9:  # Тепловая карта (псевдо)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        heatmap = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
+        processed = cv2.addWeighted(frame, 0.5, heatmap, 0.5, 0)
+
+    return processed
+
+
+# Функция для создания фото
+def take_photo(frame):
+    global photo_counter
+    if frame is not None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"photos/photo_{timestamp}_{photo_counter}.jpg"
+        cv2.imwrite(filename, frame)
+        print(f"Фото сохранено: {filename}")
+        photo_counter += 1
+        return True
+    return False
+
+
+# Функция для начала записи видео
+def start_video_recording(frame):
+    global video_writer, is_recording, video_filename
+    if frame is not None and not is_recording:
+        h, w = frame.shape[:2]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_filename = f"videos/video_{timestamp}.avi"
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        video_writer = cv2.VideoWriter(video_filename, fourcc, 20.0, (w, h))
+        is_recording = True
+        print(f"Начата запись видео: {video_filename}")
+        return True
+    return False
+
+
+# Функция для остановки записи видео
+def stop_video_recording():
+    global video_writer, is_recording
+    if is_recording and video_writer is not None:
+        video_writer.release()
+        video_writer = None
+        is_recording = False
+        print(f"Запись видео остановлена")
+        return True
+    return False
+
+
+# Поток 1 — цифры (views)
+def activ_view_key():
+    global index_views, run
+    while run:
+        event = keyboard.read_event()
+        if event.event_type == keyboard.KEY_DOWN:
+            if event.name.isdigit():
+                val = int(event.name)
+                if val in views:
+                    with lock:
+                        index_views = val
+
+
+# Поток 2 — доп. функции
+def dop_key():
+    global index_dop, run, current_frame
+
+    while run:
+        event = keyboard.read_event()
+
+        if event.event_type == keyboard.KEY_DOWN:
+            print(f"[KEY] Нажата клавиша: '{event.name}'")
+
+            if event.name in dop_f:
+                with lock:
+                    index_dop = dop_f.index(event.name)
+                    print(f"[DOP] символ='{event.name}', index_dop={index_dop}")
+
+                    # Обработка функциональных клавиш
+                    with frame_lock:
+                        frame_copy = current_frame.copy() if current_frame is not None else None
+
+                    if event.name == "s" and frame_copy is not None:  # Фото
+                        take_photo(frame_copy)
+
+                    elif event.name == "p":  # Начать запись
+                        start_video_recording(frame_copy)
+
+                    elif event.name == "z":  # Остановить запись
+                        stop_video_recording()
+
+                    elif event.name == "q":  # Выход
+                        run = False
+                        print("Выход...")
+                        break
+
+            elif event.name == "esc":
+                run = False
+                print("Выход...")
+                break
+
+
+# MAIN
+if __name__ == "__main__":
+    # Запускаем поток захвата камеры
+    t_cam = threading.Thread(target=camera_capture, daemon=True)
+    t1 = threading.Thread(target=activ_view_key, daemon=True)
+    t2 = threading.Thread(target=dop_key, daemon=True)
+
+    t_cam.start()
+    t1.start()
+    t2.start()
+
+    print("Нажимай:")
+    print("  цифры 0-9  -> выбор фильтра обработки")
+    print("  0: Исходное    1: Ч/Б      2: Сепия")
+    print("  3: Размытие    4: Края     5: Инверсия")
+    print("  6: Резкость    7: Акварель 8: Детекция лиц")
+    print("  9: Тепловая карта")
+    print("  s - сделать фото")
+    print("  p - начать запись видео")
+    print("  z - остановить запись видео")
+    print("  q - выход")
+    print("  ESC - выход")
+    print()
+
+    # Главный цикл обработки и отображения
+    current_mode = 0
+    window_name = "Camera Processing"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+
+    while run:
+        with lock:
+            v = index_views
+            d = index_dop
+
+        # Если изменился режим обработки
+        if v != -1 and v != current_mode:
+            current_mode = v
+            print(f"[MODE] Изменён режим обработки: {current_mode}")
+
+        # Получаем и обрабатываем кадр
+        with frame_lock:
+            frame_copy = current_frame.copy() if current_frame is not None else None
+
+        if frame_copy is not None:
+            # Обрабатываем изображение
+            processed_frame = process_image(frame_copy, current_mode)
+
+            # Добавляем информацию на кадр
+            info_text = f"Mode: {current_mode} | Rec: {'ON' if is_recording else 'OFF'}"
+            cv2.putText(processed_frame, info_text, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            # Отображаем кадр
+            cv2.imshow(window_name, processed_frame)
+
+            # Если идёт запись видео - записываем кадр
+            if is_recording and video_writer is not None:
+                video_writer.write(processed_frame)
+
+        # Обработка нажатий клавиш OpenCV
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q') or key == 27:  # 'q' или ESC
+            run = False
+            break
+
+        # Небольшая пауза для уменьшения нагрузки на CPU
+        time.sleep(0.01)
+
+    # Завершаем запись видео если она шла
+    if is_recording:
+        stop_video_recording()
+
+    # Закрываем окно OpenCV
+    cv2.destroyAllWindows()
+    print("Программа завершена")
