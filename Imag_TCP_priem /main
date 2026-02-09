@@ -1,0 +1,51 @@
+import cv2
+import threading  # Модуль для работы с потоками
+import time  # Модуль для работы со временем
+import subprocess  # Модуль для запуска внешних процессов
+
+from TCP import TCPVideoReceiver  # Импорт класса для приёма видео по TCP
+from TCP import TCPVideoSender  # Импорт класса для отправки видео по TCP
+from processing_loop import processing_loop  # Импорт функции основного цикла обработки кадров
+from processed_frame import ProcessedFrameBuffer  # Буфер для хранения обработанных кадров
+
+# Настройки сети для TCP-приема и отправки
+port_resiver = 5017  # Порт для приёма видео
+port_send = 5033  # Порт для отправки видео
+ip_send = "192.168.0.107"  # IP адрес для отправки видео (локальный компьютер)
+ip_send = "127.0.0.1"  # IP адрес для отправки видео (локальный компьютер)
+
+
+regim=1 # Режим обработки видео (1,2,3,4)
+
+# Создание и запуск TCP-приемника видео
+receiver = TCPVideoReceiver(port=port_resiver)
+receiver.start()  # Запуск отдельного потока для приёма видео
+
+# Создание буфера для хранения обработанных кадров
+processed_buffer = ProcessedFrameBuffer()
+
+# Создание потока обработки кадров
+processing_thread = threading.Thread(
+    target=processing_loop,  # Функция обработки кадров
+    args=(receiver, regim, processed_buffer),  # Аргументы: приёмник, режим, буфер
+    daemon=True  #завершится при закрытии программы
+)
+processing_thread.start()  # Запуск потока обработки
+
+# Создание и запуск TCP-отправителя видео
+sender = TCPVideoSender(ip=ip_send, port=port_send, imag=processed_buffer)
+sender.start()
+
+# Запуск внешнего скрипта Python для приёма TCP
+subprocess.run(["python", "priem_tcp.py"])
+
+print("[MAIN] Press Ctrl+C to exit")  # Сообщение о выходе
+
+try:
+    while True:  # Основной бесконечный цикл программы
+        time.sleep(0.001)
+except KeyboardInterrupt:  # Обработка нажатия Ctrl+C
+    print("[MAIN] Stopping...")  # Сообщение о завершении
+    receiver.stop()  # Остановка TCP-приемника
+    sender.stop()  # Остановка TCP-отправителя
+    cv2.destroyAllWindows()  # Закрытие всех окон OpenCV
